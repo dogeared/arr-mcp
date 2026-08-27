@@ -268,6 +268,85 @@ async def radarr_queue(only_stuck: bool = False) -> dict:
     return {"count": len(items), "items": items}
 
 
+@mcp.tool()
+async def radarr_delete_moviefile(
+    movie_id: int, confirm: bool = False, trigger_import: bool = True
+) -> dict:
+    """Delete a movie's current file so a blocked/pending replacement can import.
+
+    GUARDED WRITE. This is the delete-then-import step for quality swaps Radarr
+    won't auto-downgrade (e.g. replacing a Remux with a smaller BluRay/WEB-DL):
+    Radarr refuses to import the new file over a higher-ranked existing one, so
+    the old file has to be removed first.
+
+    Safety: with `confirm=False` (the default) this deletes NOTHING. It returns a
+    preview of exactly what *would* be deleted (title, path, quality, size) plus
+    whether a matching download is waiting in the queue. Re-call with
+    `confirm=True` to actually delete. Only ever touches the single `movie_id`
+    given — never a bulk/library operation.
+
+    `trigger_import=True` (default) fires RefreshMonitoredDownloads afterward so a
+    completed replacement already in the queue imports without waiting for the
+    next scan.
+    """
+    client = _require(config.RADARR, "Radarr")
+    movie = await client.get(f"movie/{movie_id}")
+    title = f"{movie.get('title')} ({movie.get('year')})"
+    mf = movie.get("movieFile") or {}
+    file_id = mf.get("id") or movie.get("movieFileId")
+
+    q = await client.get("queue", params={"pageSize": 250, "includeMovie": "true"})
+    qrecords = q.get("records", q if isinstance(q, list) else [])
+    pending = [
+        {
+            "title": x.get("title"),
+            "state": x.get("trackedDownloadState"),
+            "status": x.get("trackedDownloadStatus"),
+        }
+        for x in qrecords
+        if x.get("movieId") == movie_id or (x.get("movie") or {}).get("id") == movie_id
+    ]
+
+    if not movie.get("hasFile") or not file_id:
+        return {
+            "movie": title,
+            "movieId": movie_id,
+            "action": "none",
+            "reason": "Movie has no current file to delete.",
+            "pendingInQueue": pending,
+        }
+
+    preview = {
+        "movie": title,
+        "movieId": movie_id,
+        "fileId": file_id,
+        "path": mf.get("relativePath") or mf.get("path"),
+        "quality": (((mf.get("quality") or {}).get("quality")) or {}).get("name"),
+        "sizeGB": round((mf.get("size") or 0) / (1024 ** 3), 2),
+        "pendingInQueue": pending,
+    }
+
+    if not confirm:
+        preview["action"] = "preview"
+        preview["note"] = "Nothing deleted. Re-call with confirm=True to delete this file."
+        return preview
+
+    status = await client.delete(f"moviefile/{file_id}")
+    result = {**preview, "action": "deleted", "deleteHttpStatus": status}
+    if trigger_import:
+        try:
+            cmd = await client.post(
+                "command", json={"name": "RefreshMonitoredDownloads"}
+            )
+            result["importTriggered"] = {
+                "commandId": cmd.get("id"),
+                "status": cmd.get("status"),
+            }
+        except Exception as e:  # noqa: BLE001
+            result["importTriggered"] = {"error": str(e)}
+    return result
+
+
 # ============================================================================
 # PROWLARR (Indexers)
 # ============================================================================
