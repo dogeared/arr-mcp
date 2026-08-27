@@ -1,0 +1,34 @@
+# arr-mcp — run on the .104 docker host (same box as Sonarr/Prowlarr/Jellyseerr).
+# The container reaches Radarr/Bazarr on .112 over the LAN via their IPs in .env.
+#
+#   1. cp config.example.env .env  &&  edit .env  (real API keys + a strong MCP_AUTH_TOKEN)
+#   2. docker compose up -d --build
+#   3. Verify:  curl -s -H "Authorization: Bearer $MCP_AUTH_TOKEN" http://localhost:8787/mcp
+#      (a 400/406 "session" error means it's up and auth passed; 401 means bad token)
+
+services:
+  arr-mcp:
+    build: .
+    container_name: arr-mcp
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # Bind to localhost only — the Cloudflare Tunnel (below or your existing one)
+      # is what exposes it. Change to "8787:8787" only for LAN-local testing.
+      - "127.0.0.1:8787:8787"
+
+  # --- Optional: dedicated Cloudflare Tunnel for this MCP endpoint ------------
+  # Skip this if you'd rather add a hostname to your EXISTING Jellyfin tunnel.
+  # To use it: create a tunnel in the Cloudflare Zero Trust dashboard, copy its
+  # token, put it in .env as CLOUDFLARE_TUNNEL_TOKEN, and map a public hostname
+  # (e.g. arr-mcp.yourdomain) -> http://arr-mcp:8787 in the tunnel's config.
+  #
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: arr-mcp-tunnel
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run
+  #   environment:
+  #     - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+  #   depends_on:
+  #     - arr-mcp
