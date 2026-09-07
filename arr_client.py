@@ -65,6 +65,15 @@ class Arr:
             r.raise_for_status()
             return r.json() if r.content else {}
 
+    async def post_form(self, path: str, data: dict, timeout: Optional[float] = None) -> Any:
+        """POST a FORM-encoded body (application/x-www-form-urlencoded) with the
+        API-key header and NO JSON content-type. Bazarr's write endpoints (e.g.
+        subtitle downloads) expect form data, not JSON."""
+        async with httpx.AsyncClient(timeout=timeout or DEFAULT_TIMEOUT) as c:
+            r = await c.post(self._url(path), headers={self.key_header: self.key}, data=data)
+            r.raise_for_status()
+            return r.json() if r.content else {}
+
     async def delete(
         self, path: str, json: Optional[dict] = None, params: Optional[dict] = None
     ) -> int:

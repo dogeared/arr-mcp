@@ -6,7 +6,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY arr_client.py config.py server.py ./
+COPY arr_client.py config.py mcp_instance.py server.py ./
+COPY tools/ ./tools/
 
 # Run as non-root
 RUN useradd -m app && chown -R app /app
