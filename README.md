@@ -68,10 +68,9 @@ The MCP endpoint is `https://<your-hostname>/mcp`.
    existing Jellyfin tunnel pointing at `http://arr-mcp:8787` (or
    `http://localhost:8787` from the host). Put **Cloudflare Access** in front of
    the hostname, or rely on the bearer token — ideally both.
-2. **Add it as a custom connector in Claude.** Settings → Customize → Connectors 
-   → Add custom connector → URL `https://<your-hostname>/mcp`. Provide the bearer
-   token as the `Authorization: Bearer <token>` header. 
-   Claude will then list the tools above.
+2. **Add it as a custom connector in Claude.** Settings → Connectors → Add custom
+   connector → URL `https://<your-hostname>/mcp`. Provide the bearer token as the
+   `Authorization: Bearer <token>` header. Claude will then list the tools above.
 
 ## Security notes
 

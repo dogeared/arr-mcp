@@ -214,6 +214,99 @@ async def sonarr_lookup(term: str) -> list[dict]:
     ]
 
 
+@mcp.tool()
+async def sonarr_episode_files(series_id: int, season: Optional[int] = None) -> dict:
+    """Per-episode file inventory for a series (READ-ONLY). Optionally one `season`.
+
+    For each episode returns: epId, season, episode, title, monitored, hasFile, and
+    (if present) episodeFileId, the current on-disk `file` path, `quality`,
+    `releaseGroup`, and `sceneName` (the ORIGINAL release title Sonarr imported —
+    the reliable tell for US 'Baking Show'/Netflix vs UK 'Bake Off'/BBC, since
+    Sonarr renames the on-disk file to the series title on import). Feed
+    episodeFileId to sonarr_delete_episode_files and epId to
+    sonarr_monitor_episodes / sonarr_search_episodes.
+    """
+    client = _require(config.SONARR, "Sonarr")
+    params = {"seriesId": series_id, "includeEpisodeFile": "true"}
+    eps = await client.get("episode", params=params)
+    out = []
+    for e in eps:
+        if season is not None and e.get("seasonNumber") != season:
+            continue
+        ef = e.get("episodeFile") or {}
+        q = (((ef.get("quality") or {}).get("quality")) or {}).get("name")
+        out.append(
+            {
+                "epId": e.get("id"),
+                "season": e.get("seasonNumber"),
+                "episode": e.get("episodeNumber"),
+                "title": e.get("title"),
+                "monitored": e.get("monitored"),
+                "hasFile": e.get("hasFile"),
+                "episodeFileId": ef.get("id"),
+                "file": ef.get("relativePath"),
+                "sceneName": ef.get("sceneName"),
+                "releaseGroup": ef.get("releaseGroup"),
+                "quality": q,
+                "sizeGB": round((ef.get("size") or 0) / (1024 ** 3), 2) if ef.get("size") else None,
+            }
+        )
+    out.sort(key=lambda x: (x["season"] if x["season"] is not None else -1, x["episode"] or 0))
+    return {"seriesId": series_id, "count": len(out), "episodes": out}
+
+
+@mcp.tool()
+async def sonarr_delete_episode_files(
+    episode_file_ids: list[int], confirm: bool = False
+) -> dict:
+    """Delete specific episode FILES by episodeFileId (from sonarr_episode_files).
+
+    GUARDED WRITE. With confirm=False (default) deletes NOTHING — returns a preview
+    of exactly which files would go (path, quality, size, releaseGroup). Re-call
+    with confirm=True to delete. Only ever touches the explicit ids passed. Each
+    deleted file leaves its episode monitored-and-missing so it can be re-grabbed.
+    """
+    client = _require(config.SONARR, "Sonarr")
+    preview = []
+    for fid in episode_file_ids:
+        try:
+            ef = await client.get(f"episodefile/{fid}")
+            preview.append(
+                {
+                    "episodeFileId": fid,
+                    "path": ef.get("relativePath") or ef.get("path"),
+                    "quality": (((ef.get("quality") or {}).get("quality")) or {}).get("name"),
+                    "sceneName": ef.get("sceneName"),
+                    "releaseGroup": ef.get("releaseGroup"),
+                    "sizeGB": round((ef.get("size") or 0) / (1024 ** 3), 2),
+                }
+            )
+        except Exception as e:  # noqa: BLE001
+            preview.append({"episodeFileId": fid, "error": str(e)})
+    if not confirm:
+        return {
+            "action": "preview",
+            "count": len(preview),
+            "note": "Nothing deleted. Re-call with confirm=True to delete these files.",
+            "files": preview,
+        }
+    status = await client.delete("episodefile/bulk", json={"episodeFileIds": episode_file_ids})
+    return {"action": "deleted", "count": len(episode_file_ids), "deleteHttpStatus": status, "files": preview}
+
+
+@mcp.tool()
+async def sonarr_monitor_episodes(episode_ids: list[int], monitored: bool) -> dict:
+    """(Un)monitor specific episodes by episode id (`epId` from sonarr_episode_files).
+
+    WRITE ACTION, reversible. Use to unmonitor unwanted episodes (e.g. Season-0
+    specials so they stop showing as missing) or ensure slots are monitored before
+    a re-search.
+    """
+    client = _require(config.SONARR, "Sonarr")
+    await client.put("episode/monitor", json={"episodeIds": episode_ids, "monitored": monitored})
+    return {"updated": len(episode_ids), "monitored": monitored}
+
+
 # ============================================================================
 # RADARR (Movies)
 # ============================================================================
@@ -347,6 +440,79 @@ async def radarr_delete_moviefile(
     return result
 
 
+def _brief_release(r: dict) -> dict:
+    q = ((r.get("quality") or {}).get("quality")) or {}
+    return {
+        "title": r.get("title"),
+        "quality": q.get("name"),
+        "resolution": q.get("resolution"),
+        "sizeGB": round((r.get("size") or 0) / (1024 ** 3), 2),
+        "protocol": r.get("protocol"),
+        "seeders": r.get("seeders"),
+        "indexer": r.get("indexer"),
+        "cfScore": r.get("customFormatScore"),
+        "rejected": bool(r.get("rejected")),
+        "rejections": (r.get("rejections") or [])[:3],
+        "guid": r.get("guid"),
+        "indexerId": r.get("indexerId"),
+    }
+
+
+@mcp.tool()
+async def radarr_interactive_search(
+    movie_id: int, quality: Optional[str] = None, limit: int = 30
+) -> dict:
+    """Interactive/manual release search for a movie (READ-ONLY).
+
+    Returns candidate releases in Radarr's ranked order (best first) with quality,
+    size, protocol, seeders, indexer, custom-format score, and any rejection reasons
+    — plus each release's `guid` and `indexerId` to hand to `radarr_grab_release`.
+    `quality` filters by substring on the quality name (e.g. "1080p", "2160p",
+    "Bluray"). Use this to pick a SPECIFIC release instead of letting the profile
+    auto-grab — e.g. choosing a 1080p SDR over a Dolby-Vision WEB-DL.
+    """
+    client = _require(config.RADARR, "Radarr")
+    data = await client.get("release", params={"movieId": movie_id})
+    rels = [_brief_release(r) for r in data]
+    if quality:
+        ql = quality.lower()
+        rels = [r for r in rels if ql in (r["quality"] or "").lower()]
+    return {"count": len(rels), "releases": rels[:limit]}
+
+
+@mcp.tool()
+async def radarr_grab_release(
+    guid: str, indexer_id: int, confirm: bool = False, title: Optional[str] = None
+) -> dict:
+    """Grab (send to the download client) a SPECIFIC release from radarr_interactive_search.
+
+    GUARDED WRITE. With `confirm=False` (default) it grabs NOTHING — it echoes back
+    the guid/indexerId (and optional title) it would push, so you can eyeball the pick.
+    Re-call with `confirm=True` to actually send it to SAB/qBit. Pass `guid` and
+    `indexer_id` exactly as returned by the search. This overrides the quality
+    profile's automatic choice (e.g. force a 1080p when the profile prefers 2160p).
+    NOTE: Radarr's grab response status is unreliable — verify with radarr_queue.
+    """
+    client = _require(config.RADARR, "Radarr")
+    if not confirm:
+        return {
+            "action": "preview",
+            "note": "Nothing grabbed. Re-call with confirm=True to send this release.",
+            "guid": guid,
+            "indexerId": indexer_id,
+            "title": title,
+        }
+    r = await client.post("release", json={"guid": guid, "indexerId": indexer_id})
+    return {
+        "action": "grabbed",
+        "guid": guid,
+        "indexerId": indexer_id,
+        "title": title,
+        "result": r if isinstance(r, dict) else {"ok": True},
+        "verify": "Check radarr_queue to confirm it landed.",
+    }
+
+
 # ============================================================================
 # PROWLARR (Indexers)
 # ============================================================================
@@ -370,6 +536,57 @@ async def prowlarr_indexers() -> list[dict]:
         }
         for i in data
     ]
+
+
+@mcp.tool()
+async def prowlarr_test_indexers() -> dict:
+    """Test every configured indexer and report which pass vs fail.
+
+    READ-ONLY (runs a live connectivity test; changes no config). Returns each
+    indexer's name, whether it passed, and any error messages — use this to see
+    WHY an indexer flagged in prowlarr_health is failing (dead domain, Cloudflare
+    challenge, auth, etc.) before deciding to fix or disable it.
+    """
+    client = _require(config.PROWLARR, "Prowlarr")
+    idx = await client.get("indexer")
+    names = {i.get("id"): i.get("name") for i in idx}
+    results = await client.post_raw("indexer/testall", timeout=120.0)
+    out = []
+    for r in results or []:
+        failures = [
+            (f.get("errorMessage") or f.get("propertyName") or "").strip()
+            for f in (r.get("validationFailures") or [])
+        ]
+        out.append(
+            {
+                "id": r.get("id"),
+                "name": names.get(r.get("id"), r.get("id")),
+                "ok": bool(r.get("isValid")),
+                "errors": [f for f in failures if f],
+            }
+        )
+    return {"tested": len(out), "failing": sum(1 for r in out if not r["ok"]), "results": out}
+
+
+@mcp.tool()
+async def prowlarr_set_indexer(indexer_id: int, enable: bool) -> dict:
+    """Enable or disable ONE indexer by id (ids from prowlarr_indexers).
+
+    WRITE ACTION, fully reversible — flips just this indexer's `enable` flag via
+    Prowlarr's bulk editor. Use to disable a chronically-dead indexer (so it stops
+    adding failures/latency to every search) or re-enable one after a fix.
+    """
+    client = _require(config.PROWLARR, "Prowlarr")
+    idx = await client.get(f"indexer/{indexer_id}")            # full resource
+    idx["enable"] = enable
+    updated = await client.put(f"indexer/{indexer_id}", json=idx)
+    body = updated if isinstance(updated, dict) and updated else idx
+    return {
+        "id": body.get("id"),
+        "name": body.get("name"),
+        "enable": body.get("enable"),
+        "action": "enabled" if enable else "disabled",
+    }
 
 
 # ============================================================================

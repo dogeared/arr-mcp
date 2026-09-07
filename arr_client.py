@@ -43,9 +43,25 @@ class Arr:
             r.raise_for_status()
             return r.json()
 
-    async def post(self, path: str, json: Optional[dict] = None) -> Any:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+    async def post(
+        self, path: str, json: Optional[dict] = None, timeout: Optional[float] = None
+    ) -> Any:
+        async with httpx.AsyncClient(timeout=timeout or DEFAULT_TIMEOUT) as c:
             r = await c.post(self._url(path), headers=self._headers(), json=json or {})
+            r.raise_for_status()
+            return r.json() if r.content else {}
+
+    async def put(self, path: str, json: Optional[dict] = None) -> Any:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.put(self._url(path), headers=self._headers(), json=json or {})
+            r.raise_for_status()
+            return r.json() if r.content else {}
+
+    async def post_raw(self, path: str, timeout: Optional[float] = None) -> Any:
+        """POST with no JSON body/content-type (some *arr action endpoints, e.g.
+        Prowlarr indexer/testall, 400 on an empty `{}` body)."""
+        async with httpx.AsyncClient(timeout=timeout or DEFAULT_TIMEOUT) as c:
+            r = await c.post(self._url(path), headers={self.key_header: self.key})
             r.raise_for_status()
             return r.json() if r.content else {}
 
