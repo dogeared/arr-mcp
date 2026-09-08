@@ -1,17 +1,26 @@
 """Bazarr (Subtitles) tools.
 
 NOTE: Bazarr's API is finicky — several write endpoints expect FORM-encoded
-bodies (not JSON), handled via Arr.post_form. The subtitle-download tools here
-have not been exercised against a live Bazarr and should be smoke-tested.
+bodies (not JSON), handled via Arr.post_form. Booleans must be sent as the
+strings "True"/"False", and the EPISODE download requires BOTH seriesid and
+episodeid. Download tools capture the response body on HTTP errors for
+diagnosis.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
+
+import httpx
 
 from mcp_instance import mcp
 
 import config
 from tools.common import _require
+
+
+def _bstr(x: bool) -> str:
+    """Bazarr expects capitalized True/False in form bodies."""
+    return "True" if x else "False"
 
 
 # ============================================================================
@@ -31,7 +40,7 @@ async def bazarr_wanted_series(limit: int = 100) -> dict:
     """List episodes with wanted (missing) subtitles (READ-ONLY).
 
     Returns rows: seriesTitle, season, episode, episodeTitle, missing_subtitles,
-    sonarrSeriesId, sonarrEpisodeId. Feed sonarrEpisodeId to
+    sonarrSeriesId, sonarrEpisodeId. Feed sonarrSeriesId + sonarrEpisodeId to
     bazarr_episode_subtitle_search / bazarr_download_episode_subtitle.
     """
     client = _require(config.BAZARR, "Bazarr")
@@ -114,20 +123,18 @@ async def bazarr_download_movie_subtitle(
 ) -> dict:
     """Download a SPECIFIC movie subtitle chosen from bazarr_movie_subtitle_search.
 
-    GUARDED WRITE (FORM-encoded POST providers/movies). With confirm=False (default)
-    downloads NOTHING — returns a preview of the parameters. Re-call with
-    confirm=True to download. Pass provider/subtitle/original_format exactly as
-    returned by the search. NEEDS SMOKE TEST against a live Bazarr.
+    GUARDED WRITE (FORM-encoded POST providers/movies). confirm=False previews;
+    confirm=True downloads. Pass provider/subtitle exactly as returned by search.
     """
     client = _require(config.BAZARR, "Bazarr")
     form = {
         "radarrid": radarr_id,
         "language": language,
-        "hi": hi,
-        "forced": forced,
+        "hi": _bstr(hi),
+        "forced": _bstr(forced),
         "provider": provider,
         "subtitle": subtitle,
-        "original_format": original_format,
+        "original_format": _bstr(original_format),
     }
     if not confirm:
         return {
@@ -135,12 +142,17 @@ async def bazarr_download_movie_subtitle(
             "note": "Nothing downloaded. Re-call with confirm=True to download this subtitle.",
             "params": form,
         }
-    r = await client.post_form("providers/movies", data=form)
+    try:
+        r = await client.post_form("providers/movies", data=form)
+    except httpx.HTTPStatusError as e:
+        return {"action": "error", "status": e.response.status_code,
+                "body": e.response.text[:500], "params": form}
     return {"action": "downloaded", "params": form, "result": r}
 
 
 @mcp.tool()
 async def bazarr_download_episode_subtitle(
+    sonarr_series_id: int,
     sonarr_episode_id: int,
     language: str,
     hi: bool,
@@ -152,20 +164,21 @@ async def bazarr_download_episode_subtitle(
 ) -> dict:
     """Download a SPECIFIC episode subtitle chosen from bazarr_episode_subtitle_search.
 
-    GUARDED WRITE (FORM-encoded POST providers/episodes). With confirm=False
-    (default) downloads NOTHING — returns a preview of the parameters. Re-call with
-    confirm=True to download. Pass provider/subtitle/original_format exactly as
-    returned by the search. NEEDS SMOKE TEST against a live Bazarr.
+    GUARDED WRITE (FORM-encoded POST providers/episodes). Bazarr requires BOTH
+    `seriesid` (sonarr_series_id) and `episodeid` (sonarr_episode_id). confirm=False
+    previews; confirm=True downloads. Pass provider/subtitle exactly as returned
+    by search.
     """
     client = _require(config.BAZARR, "Bazarr")
     form = {
+        "seriesid": sonarr_series_id,
         "episodeid": sonarr_episode_id,
         "language": language,
-        "hi": hi,
-        "forced": forced,
+        "hi": _bstr(hi),
+        "forced": _bstr(forced),
         "provider": provider,
         "subtitle": subtitle,
-        "original_format": original_format,
+        "original_format": _bstr(original_format),
     }
     if not confirm:
         return {
@@ -173,5 +186,9 @@ async def bazarr_download_episode_subtitle(
             "note": "Nothing downloaded. Re-call with confirm=True to download this subtitle.",
             "params": form,
         }
-    r = await client.post_form("providers/episodes", data=form)
+    try:
+        r = await client.post_form("providers/episodes", data=form)
+    except httpx.HTTPStatusError as e:
+        return {"action": "error", "status": e.response.status_code,
+                "body": e.response.text[:500], "params": form}
     return {"action": "downloaded", "params": form, "result": r}
