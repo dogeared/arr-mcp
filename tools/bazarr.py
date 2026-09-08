@@ -152,7 +152,6 @@ async def bazarr_download_movie_subtitle(
 
 @mcp.tool()
 async def bazarr_download_episode_subtitle(
-    sonarr_series_id: int,
     sonarr_episode_id: int,
     language: str,
     hi: bool,
@@ -165,13 +164,19 @@ async def bazarr_download_episode_subtitle(
     """Download a SPECIFIC episode subtitle chosen from bazarr_episode_subtitle_search.
 
     GUARDED WRITE (FORM-encoded POST providers/episodes). Bazarr requires BOTH
-    `seriesid` (sonarr_series_id) and `episodeid` (sonarr_episode_id). confirm=False
-    previews; confirm=True downloads. Pass provider/subtitle exactly as returned
-    by search.
+    `seriesid` and `episodeid`; the seriesid is resolved automatically from Sonarr
+    (GET episode/{id}.seriesId), so callers only pass the episode id. confirm=False
+    previews; confirm=True downloads.
     """
     client = _require(config.BAZARR, "Bazarr")
+    try:
+        ep = await _require(config.SONARR, "Sonarr").get(f"episode/{sonarr_episode_id}")
+        series_id = ep.get("seriesId")
+    except Exception as e:  # noqa: BLE001
+        return {"action": "error", "note": "could not resolve seriesId from Sonarr",
+                "detail": str(e), "sonarr_episode_id": sonarr_episode_id}
     form = {
-        "seriesid": sonarr_series_id,
+        "seriesid": series_id,
         "episodeid": sonarr_episode_id,
         "language": language,
         "hi": _bstr(hi),
