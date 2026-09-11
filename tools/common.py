@@ -37,6 +37,7 @@ def _brief_series(s: dict) -> dict:
 
 def _brief_queue_item(x: dict) -> dict:
     return {
+        "id": x.get("id"),
         "title": x.get("title"),
         "series": (x.get("series") or {}).get("title"),
         "seriesId": (x.get("series") or {}).get("id"),
